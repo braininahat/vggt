@@ -1,0 +1,69 @@
+# Medium configuration - balanced between memory and performance
+
+model:
+  pretrained_name: "facebook/VGGT-1B"  
+  freeze_aggregator: false              # Unfreeze aggregator (most important)
+  freeze_camera_head: true              # Keep camera frozen initially
+  predict_depth: true                   
+  predict_points: true                  
+
+data:
+  hdf5_root_dir: "/home/varun/XiaLabSync/datasets/freehand_May212025/processed"
+  img_size: 518                         
+  patch_size: 14                        
+  sequence_length: 8                    # Medium sequence length
+  stride: 3                             # Some temporal spacing
+  batch_size: 2                         # Small batch
+  num_workers: 4                        
+  max_sequences_per_file: 10            
+  train_split_ratio: 0.8                
+  enable_augmentation: false            # No augmentation yet
+  aug_scales: [0.9, 1.1]                
+
+optimizer:
+  type: "adamw"
+  lr: 5e-5                              # Conservative learning rate
+  weight_decay: 0.05
+  beta1: 0.9
+  beta2: 0.999
+
+scheduler:
+  type: "cosine"
+  min_lr: 1e-6
+
+loss:
+  # Balanced weights for ultrasound
+  weight_camera: 0.5                    # Medium weight since frozen
+  weight_depth: 0.8                     # High weight for depth
+  weight_point: 1.0                     # Highest for pointmaps
+  
+  # Camera loss settings
+  camera_loss_type: "l1"
+  weight_camera_T: 1.0
+  weight_camera_R: 1.0
+  weight_camera_fl: 0.5
+  
+  # Depth loss settings
+  depth_conf_alpha: 0.2
+  depth_gradient_loss: "grad"
+  disable_depth_conf: false
+  
+  # Point loss settings
+  normalize_pred_points: true
+  point_conf_alpha: 0.2
+  point_gradient_loss: "grad"
+  disable_point_conf: false
+
+training:
+  num_epochs: 50
+  grad_clip: 1.0
+  save_freq: 5
+  checkpoint_dir: "./checkpoints/ultrasound_medium"
+  use_amp: true                         # Keep mixed precision
+  gradient_accumulation_steps: 2        # Some accumulation
+
+logging:
+  use_wandb: false
+  wandb_project: "vggt-ultrasound"
+  exp_name: "ultrasound_finetune_medium"
+  log_freq: 10

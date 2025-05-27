@@ -1,0 +1,70 @@
+# Full configuration for VGGT on ultrasound - closer to original training
+# WARNING: This requires significant GPU memory (likely 40GB+)
+
+model:
+  pretrained_name: "facebook/VGGT-1B"  
+  freeze_aggregator: false              # Train everything (original approach)
+  freeze_camera_head: false             # Train everything
+  predict_depth: true                   
+  predict_points: true                  
+
+data:
+  hdf5_root_dir: "/home/varun/XiaLabSync/datasets/freehand_May212025/processed"
+  img_size: 518                         
+  patch_size: 14                        
+  sequence_length: 16                   # Longer sequences for better temporal learning
+  stride: 1                             # Dense temporal sampling
+  batch_size: 8                         # Larger batch for better gradients
+  num_workers: 8                        # More workers for faster loading
+  max_sequences_per_file: 20            # More sequences per file
+  train_split_ratio: 0.8                
+  enable_augmentation: true             # Enable augmentation (original uses this)
+  aug_scales: [0.8, 1.2]                # Wider augmentation range
+
+optimizer:
+  type: "adamw"
+  lr: 1e-4                              # Higher learning rate for full training
+  weight_decay: 0.05
+  beta1: 0.9
+  beta2: 0.999
+
+scheduler:
+  type: "cosine"
+  min_lr: 1e-6
+
+loss:
+  # Original VGGT uses balanced weights
+  weight_camera: 1.0                    # Full weight for camera learning
+  weight_depth: 1.0                     # Full weight for depth
+  weight_point: 1.0                     # Full weight for points
+  
+  # Camera loss settings
+  camera_loss_type: "l1"
+  weight_camera_T: 1.0
+  weight_camera_R: 1.0
+  weight_camera_fl: 0.5
+  
+  # Depth loss settings
+  depth_conf_alpha: 0.2
+  depth_gradient_loss: "grad"
+  disable_depth_conf: false
+  
+  # Point loss settings
+  normalize_pred_points: true
+  point_conf_alpha: 0.2
+  point_gradient_loss: "grad"
+  disable_point_conf: false
+
+training:
+  num_epochs: 100                       # More epochs for full training
+  grad_clip: 1.0
+  save_freq: 5
+  checkpoint_dir: "./checkpoints/ultrasound_full"
+  use_amp: false                        # Full precision (original approach)
+  gradient_accumulation_steps: 1        # No accumulation needed with larger batch
+
+logging:
+  use_wandb: true                       # Enable logging for full training
+  wandb_project: "vggt-ultrasound-full"
+  exp_name: "ultrasound_finetune_full"
+  log_freq: 10

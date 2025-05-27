@@ -1,0 +1,69 @@
+# Configuration for finetuning VGGT on ultrasound data
+
+model:
+  pretrained_name: "facebook/VGGT-1B"  # Only available pretrained model
+  freeze_aggregator: true               # Freeze to save memory (can unfreeze later)
+  freeze_camera_head: true              # Freeze to save memory (can unfreeze later)
+  predict_depth: true                   # Predict depth maps
+  predict_points: true                  # Predict 3D pointmaps
+
+data:
+  hdf5_root_dir: "/home/varun/XiaLabSync/datasets/freehand_May212025/processed"
+  img_size: 518                         # Image size (must be divisible by patch_size)
+  patch_size: 14                        # Vision transformer patch size
+  sequence_length: 4                    # Number of frames per sequence (reduced for memory)
+  stride: 10                            # Stride between frames in sequence
+  batch_size: 1                         # Batch size (minimum for memory constraints)
+  num_workers: 2                        # Data loading workers (reduced for memory)
+  max_sequences_per_file: 10            # Max sequences from each HDF5 file
+  train_split_ratio: 0.8                # Train/val split ratio
+  enable_augmentation: false            # Start without augmentation
+  aug_scales: [0.9, 1.1]                # Scale augmentation range (when enabled)
+
+optimizer:
+  type: "adamw"
+  lr: 1e-5                              # Learning rate (lower for finetuning)
+  weight_decay: 0.05
+  beta1: 0.9
+  beta2: 0.999
+
+scheduler:
+  type: "cosine"                        # Learning rate schedule
+  min_lr: 1e-6
+
+loss:
+  # Loss weights - emphasize point loss for ultrasound
+  weight_camera: 0.1                    # Lower weight for synthetic cameras
+  weight_depth: 0.2                     # Medium weight for depth
+  weight_point: 1.0                     # High weight for pointmaps (main supervision)
+  
+  # Camera loss settings
+  camera_loss_type: "l1"
+  weight_camera_T: 1.0
+  weight_camera_R: 1.0
+  weight_camera_fl: 0.5
+  
+  # Depth loss settings
+  depth_conf_alpha: 0.2
+  depth_gradient_loss: "grad"           # Gradient regularization
+  disable_depth_conf: false
+  
+  # Point loss settings
+  normalize_pred_points: true           # Normalize pointclouds
+  point_conf_alpha: 0.2
+  point_gradient_loss: "grad"           # Gradient regularization
+  disable_point_conf: false
+
+training:
+  num_epochs: 50
+  grad_clip: 1.0                        # Gradient clipping
+  save_freq: 5                          # Save checkpoint every N epochs
+  checkpoint_dir: "./checkpoints/ultrasound"
+  use_amp: true                         # Use automatic mixed precision for memory efficiency
+  gradient_accumulation_steps: 4        # Accumulate gradients to simulate larger batch size
+
+logging:
+  use_wandb: false                      # Enable Weights & Biases logging
+  wandb_project: "vggt-ultrasound"
+  exp_name: "ultrasound_finetune"
+  log_freq: 10                          # Log every N batches
