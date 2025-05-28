@@ -33,10 +33,10 @@ class UltrasoundHDF5Dataset(BaseDataset):
         self,
         common_conf,
         hdf5_root_dir: str,
+        max_sequences_per_file: int,
         split: str = "train",
         sequence_length: int = 8,
         stride: int = 1,
-        max_sequences_per_file: int = 10,
         enable_augmentation: bool = False,
         train_split_ratio: float = 0.8,
         random_seed: int = 42,
@@ -47,10 +47,10 @@ class UltrasoundHDF5Dataset(BaseDataset):
         Args:
             common_conf: Common configuration from BaseDataset
             hdf5_root_dir: Root directory containing HDF5 files
+            max_sequences_per_file: Maximum sequences to sample from each HDF5 file (-1 for all)
             split: 'train' or 'test' split
             sequence_length: Number of frames per sequence
             stride: Stride between frames in a sequence
-            max_sequences_per_file: Maximum sequences to sample from each HDF5 file
             enable_augmentation: Whether to enable data augmentation (default: False)
             train_split_ratio: Ratio of data to use for training
             random_seed: Random seed for reproducible splits
@@ -105,7 +105,13 @@ class UltrasoundHDF5Dataset(BaseDataset):
                     continue
                 
                 # Sample evenly spaced starting indices
-                num_sequences = min(max_start_idx, self.max_sequences_per_file)
+                if self.max_sequences_per_file < 0:
+                    # Use all available sequences
+                    num_sequences = max_start_idx
+                else:
+                    # Limit to max_sequences_per_file
+                    num_sequences = min(max_start_idx, self.max_sequences_per_file)
+                
                 if num_sequences > 1:
                     start_indices = np.linspace(0, max_start_idx - 1, num_sequences, dtype=int)
                 else:
@@ -211,6 +217,10 @@ class UltrasoundHDF5Dataset(BaseDataset):
             # Load frames and pointmaps
             frames = []
             pointmaps = []
+            corners_data = []
+            
+            # Check if corners exist
+            has_corners = 'corners' in hf
             
             for idx in frame_indices:
                 frame = hf['frames'][idx]
@@ -218,6 +228,16 @@ class UltrasoundHDF5Dataset(BaseDataset):
                 
                 frames.append(frame)
                 pointmaps.append(pointmap)
+                
+                # Load corner data if available
+                if has_corners:
+                    corners = {
+                        'c1': np.array([hf['corners'][f'c1_{ax}'][idx] for ax in ['x', 'y', 'z']]),
+                        'c2': np.array([hf['corners'][f'c2_{ax}'][idx] for ax in ['x', 'y', 'z']]),
+                        'c3': np.array([hf['corners'][f'c3_{ax}'][idx] for ax in ['x', 'y', 'z']]),
+                        'c4': np.array([hf['corners'][f'c4_{ax}'][idx] for ax in ['x', 'y', 'z']]),
+                    }
+                    corners_data.append(corners)
             
             frames = np.stack(frames)
             pointmaps = np.stack(pointmaps)
@@ -260,15 +280,15 @@ class UltrasoundHDF5Dataset(BaseDataset):
         
         # Process each frame
         processed_data = []
+        has_corners = len(corners_data) > 0
+        
         for i in range(len(frames)):
             # For ultrasound, we need to handle pointmaps specially
-            # We'll pass a dummy depth map and then use our pointmap
-            dummy_depth = np.zeros(frames[i].shape[:2])
-            
+            # Use the actual depth for processing to get proper masks
             # Process image (this handles resizing, cropping, etc.)
             image, _, extri, intri, _, _, mask, _ = self.process_one_image(
                 frames[i],
-                dummy_depth,
+                depths[i],  # Use actual depth instead of dummy
                 extrinsics[i],
                 intrinsics[i],
                 np.array(frames[i].shape[:2]),
@@ -278,22 +298,37 @@ class UltrasoundHDF5Dataset(BaseDataset):
             )
             
             # Apply the same transformations to pointmap
-            # First, we need to resize/crop the pointmap to match the processed image
-            pointmap = pointmaps[i]
+            # Instead of resizing the pointmap, regenerate it at the new resolution
             original_shape = frames[i].shape[:2]
             processed_shape = image.shape[:2]
             
-            # If shapes don't match, we need to resize the pointmap
-            if original_shape != processed_shape:
-                # Resize each coordinate channel
-                pointmap_resized = np.zeros((*processed_shape, 3))
-                for c in range(3):
-                    pointmap_resized[:, :, c] = cv2.resize(
-                        pointmap[:, :, c], 
-                        (processed_shape[1], processed_shape[0]),
-                        interpolation=cv2.INTER_LINEAR
-                    )
-                pointmap = pointmap_resized
+            if original_shape != processed_shape and has_corners and i < len(corners_data):
+                # Regenerate pointmap using corner data
+                corners = corners_data[i]
+                c1, c2, c3, c4 = corners['c1'], corners['c2'], corners['c3'], corners['c4']
+                
+                # Regenerate pointmap at new resolution
+                H_new, W_new = processed_shape
+                u = np.linspace(0, 1, W_new, dtype=np.float32)
+                v = np.linspace(0, 1, H_new, dtype=np.float32)
+                uu, vv = np.meshgrid(u, v)
+                
+                # Bilinear interpolation
+                top = c1[None, None, :] * (1 - uu[:, :, None]) + c2[None, None, :] * uu[:, :, None]
+                bottom = c4[None, None, :] * (1 - uu[:, :, None]) + c3[None, None, :] * uu[:, :, None]
+                pointmap = top * (1 - vv[:, :, None]) + bottom * vv[:, :, None]
+            else:
+                # Fall back to loading or resizing
+                pointmap = pointmaps[i]
+                if original_shape != processed_shape:
+                    pointmap_resized = np.zeros((*processed_shape, 3))
+                    for c in range(3):
+                        pointmap_resized[:, :, c] = cv2.resize(
+                            pointmap[:, :, c], 
+                            (processed_shape[1], processed_shape[0]),
+                            interpolation=cv2.INTER_LINEAR
+                        )
+                    pointmap = pointmap_resized
             
             # Recalculate depth with the processed pointmap
             camera_center = extri[:3, 3]

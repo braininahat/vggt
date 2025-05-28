@@ -15,6 +15,117 @@ from math import ceil, floor
 from vggt.utils.pose_enc import extri_intri_to_pose_encoding, pose_encoding_to_extri_intri
 
 
+def camera_to_rel_deg(pred_extrinsic, gt_extrinsic, device):
+    """
+    Calculate relative rotation and translation angles in degrees between predicted and ground truth camera poses.
+    
+    Args:
+        pred_extrinsic: Predicted extrinsic matrices (B, S, 4, 4) or (B, S, 3, 4)
+        gt_extrinsic: Ground truth extrinsic matrices (B, S, 4, 4) or (B, S, 3, 4)
+        device: Device to perform computations on
+        
+    Returns:
+        rel_rangle_deg: Relative rotation angles in degrees (B*S,)
+        rel_tangle_deg: Relative translation angles in degrees (B*S,)
+    """
+    # Ensure 4x4 matrices
+    if pred_extrinsic.shape[-2:] == (3, 4):
+        # Add homogeneous row
+        batch_shape = pred_extrinsic.shape[:-2]
+        bottom = torch.tensor([0, 0, 0, 1], device=device, dtype=pred_extrinsic.dtype)
+        bottom = bottom.view(*[1]*len(batch_shape), 1, 4).expand(*batch_shape, 1, 4)
+        pred_extrinsic = torch.cat([pred_extrinsic, bottom], dim=-2)
+        
+    if gt_extrinsic.shape[-2:] == (3, 4):
+        batch_shape = gt_extrinsic.shape[:-2]
+        bottom = torch.tensor([0, 0, 0, 1], device=device, dtype=gt_extrinsic.dtype)
+        bottom = bottom.view(*[1]*len(batch_shape), 1, 4).expand(*batch_shape, 1, 4)
+        gt_extrinsic = torch.cat([gt_extrinsic, bottom], dim=-2)
+    
+    # Flatten batch and sequence dimensions
+    B, S = pred_extrinsic.shape[:2]
+    pred_extrinsic = pred_extrinsic.view(B * S, 4, 4)
+    gt_extrinsic = gt_extrinsic.view(B * S, 4, 4)
+    
+    # Extract rotation matrices and translation vectors
+    pred_R = pred_extrinsic[:, :3, :3]
+    pred_t = pred_extrinsic[:, :3, 3]
+    gt_R = gt_extrinsic[:, :3, :3]
+    gt_t = gt_extrinsic[:, :3, 3]
+    
+    # Calculate relative rotation
+    # R_rel = R_gt^T @ R_pred (relative rotation from pred to gt)
+    R_rel = torch.bmm(gt_R.transpose(1, 2), pred_R)
+    
+    # Calculate rotation angle from rotation matrix
+    # angle = arccos((trace(R) - 1) / 2)
+    trace = R_rel[:, 0, 0] + R_rel[:, 1, 1] + R_rel[:, 2, 2]
+    cos_angle = (trace - 1) / 2
+    cos_angle = torch.clamp(cos_angle, -1, 1)  # Numerical stability
+    rel_rangle = torch.acos(cos_angle)
+    rel_rangle_deg = rel_rangle * 180 / torch.pi
+    
+    # Calculate relative translation angle
+    # Normalize translation vectors
+    pred_t_norm = F.normalize(pred_t, dim=1, eps=1e-8)
+    gt_t_norm = F.normalize(gt_t, dim=1, eps=1e-8)
+    
+    # Calculate angle between translation vectors
+    cos_tangle = torch.sum(pred_t_norm * gt_t_norm, dim=1)
+    cos_tangle = torch.clamp(cos_tangle, -1, 1)  # Numerical stability
+    rel_tangle = torch.acos(cos_tangle)
+    rel_tangle_deg = rel_tangle * 180 / torch.pi
+    
+    return rel_rangle_deg, rel_tangle_deg
+
+
+def calculate_auc(rel_rangle_deg, rel_tangle_deg, max_threshold=30, return_list=False):
+    """
+    Calculate AUC (Area Under Curve) for camera pose accuracy.
+    
+    Args:
+        rel_rangle_deg: Relative rotation angles in degrees
+        rel_tangle_deg: Relative translation angles in degrees
+        max_threshold: Maximum threshold for AUC calculation
+        return_list: If True, return histogram list
+        
+    Returns:
+        auc: AUC value
+        normalized_histogram: If return_list=True, returns histogram
+    """
+    # Combine rotation and translation errors
+    # Use the maximum of the two as the error metric
+    combined_error = torch.max(rel_rangle_deg, rel_tangle_deg)
+    
+    # Create histogram bins
+    num_bins = max_threshold
+    bins = torch.linspace(0, max_threshold, num_bins + 1, device=combined_error.device)
+    
+    # Calculate histogram
+    histogram = torch.zeros(num_bins, device=combined_error.device)
+    for i in range(num_bins):
+        mask = (combined_error >= bins[i]) & (combined_error < bins[i + 1])
+        histogram[i] = mask.float().sum()
+    
+    # Normalize histogram
+    total_samples = combined_error.numel()
+    if total_samples > 0:
+        normalized_histogram = histogram / total_samples
+    else:
+        normalized_histogram = histogram
+    
+    # Calculate cumulative histogram (for AUC)
+    cumulative_histogram = torch.cumsum(normalized_histogram, dim=0)
+    
+    # Calculate AUC
+    auc = cumulative_histogram.mean()
+    
+    if return_list:
+        return auc, normalized_histogram
+    else:
+        return auc
+
+
 def check_and_fix_inf_nan(loss_tensor, loss_name, hard_max = 100):
     """
     Checks if 'loss_tensor' contains inf or nan. If it does, replace those 
@@ -288,7 +399,7 @@ def conf_loss(pts3d, pts3d_conf, gt_pts3d, valid_mask,  batch, normalize_gt=True
     else:
         conf_loss_first_frame = pts3d * 0
         conf_loss_other_frames = pts3d * 0
-        print("No valid conf loss", batch["seq_name"])
+        # print("No valid conf loss", batch["seq_name"])
 
 
     if all_mean and conf_loss_first_frame.numel() > 0 and conf_loss_other_frames.numel() > 0:

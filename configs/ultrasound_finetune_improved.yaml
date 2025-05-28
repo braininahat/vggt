@@ -1,0 +1,81 @@
+model:
+  pretrained_name: "facebook/VGGT-1B"
+  freeze_aggregator: false  # Unfreeze for better adaptation
+  freeze_camera_head: false  # Unfreeze for synthetic camera learning
+  predict_depth: true
+  predict_points: true
+
+data:
+  hdf5_root_dir: "/home/varun/XiaLabSync/datasets/freehand_May212025/processed"
+  img_size: 518
+  patch_size: 14
+  sequence_length: 4
+  stride: 5  # Reduced stride for more temporal consistency
+  batch_size: 2  # Slightly larger if memory allows
+  num_workers: 4
+  max_sequences_per_file: 20
+  train_split_ratio: 0.8
+  enable_augmentation: false
+  aug_scales: [0.9, 1.1]
+  # New options for better handling
+  preserve_aspect_ratio: true  # Use padding instead of stretching
+  regenerate_pointmaps: true   # Regenerate instead of interpolating
+
+optimizer:
+  type: "adamw"
+  lr: 5e-6  # Lower learning rate since we're unfreezing more
+  weight_decay: 0.05
+  beta1: 0.9
+  beta2: 0.999
+
+scheduler:
+  type: "cosine"
+  min_lr: 1e-7
+  warmup_epochs: 2  # Add warmup
+
+loss:
+  # Adjusted weights for ultrasound
+  weight_camera: 0.5   # Increased for synthetic camera learning
+  weight_depth: 0.3    # Moderate weight
+  weight_point: 1.0    # Primary supervision
+  
+  # Camera loss settings
+  camera_loss_type: "l1"
+  weight_camera_T: 1.0
+  weight_camera_R: 1.0
+  weight_camera_fl: 0.5
+  
+  # Depth loss settings
+  depth_conf_alpha: 0.1  # Lower confidence penalty
+  depth_gradient_loss: "grad"
+  disable_depth_conf: false
+  
+  # Point loss settings
+  normalize_pred_points: true
+  point_conf_alpha: 0.1  # Lower confidence penalty
+  point_gradient_loss: "grad"
+  disable_point_conf: false
+  
+  # Ultrasound-specific settings
+  valid_range: 0.95  # Use 95th percentile for outlier filtering
+  all_mean: true     # Average all losses together
+
+training:
+  num_epochs: 100
+  grad_clip: 0.5  # More aggressive gradient clipping
+  save_freq: 5
+  checkpoint_dir: "./checkpoints/ultrasound_improved"
+  use_amp: true
+  gradient_accumulation_steps: 2  # Reduced for better gradient flow
+  
+  # Ultrasound-specific training settings
+  validate_every_n_epochs: 2
+  early_stopping_patience: 10
+  reduce_lr_patience: 5
+
+logging:
+  use_wandb: true
+  wandb_project: "vggt-ultrasound-improved"
+  exp_name: "ultrasound_preserve_geometry"
+  log_freq: 10
+  visualize_every_n_batches: 100  # Add visualization during training

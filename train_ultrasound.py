@@ -76,6 +76,13 @@ class UltrasoundTrainer:
             print("Freezing camera head...")
             for param in model.camera_head.parameters():
                 param.requires_grad = False
+        
+        # Count trainable parameters
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"Total parameters: {total_params:,}")
+        print(f"Trainable parameters: {trainable_params:,}")
+        print(f"Frozen parameters: {total_params - trainable_params:,}")
 
         return model
 
@@ -102,10 +109,10 @@ class UltrasoundTrainer:
         train_dataset = UltrasoundHDF5Dataset(
             common_conf=common_conf,
             hdf5_root_dir=self.config.data.hdf5_root_dir,
+            max_sequences_per_file=self.config.data.max_sequences_per_file,
             split="train",
             sequence_length=self.config.data.sequence_length,
             stride=self.config.data.stride,
-            max_sequences_per_file=self.config.data.max_sequences_per_file,
             enable_augmentation=self.config.data.enable_augmentation,
             train_split_ratio=self.config.data.train_split_ratio,
         )
@@ -118,10 +125,10 @@ class UltrasoundTrainer:
         val_dataset = UltrasoundHDF5Dataset(
             common_conf=val_common_conf,
             hdf5_root_dir=self.config.data.hdf5_root_dir,
+            max_sequences_per_file=self.config.data.max_sequences_per_file,
             split="test",
             sequence_length=self.config.data.sequence_length,
             stride=self.config.data.stride,
-            max_sequences_per_file=self.config.data.max_sequences_per_file,
             enable_augmentation=False,
             train_split_ratio=self.config.data.train_split_ratio,
         )
@@ -247,15 +254,33 @@ class UltrasoundTrainer:
 
         epoch_losses = []
         accumulation_steps = self.config.training.gradient_accumulation_steps
+        
+        # Initialize running averages
+        running_losses = {}
+        num_batches = 0
 
-        for batch_idx, batch in enumerate(
-            tqdm(train_loader, desc=f"Epoch {self.epoch}")
-        ):
+        # Create progress bar
+        pbar = tqdm(train_loader, desc=f"Epoch {self.epoch}")
+        
+        for batch_idx, batch in enumerate(pbar):
             # Move batch to device
             batch = {
                 k: v.to(self.device) if isinstance(v, torch.Tensor) else v
                 for k, v in batch.items()
             }
+            
+            # Debug first batch
+            if batch_idx == 0 and self.epoch == 0:
+                print(f"\nFirst batch info:")
+                print(f"  Batch keys: {list(batch.keys())}")
+                if 'point_masks' in batch:
+                    valid_points = batch['point_masks'].sum().item()
+                    total_points = batch['point_masks'].numel()
+                    print(f"  Valid points: {valid_points}/{total_points} ({valid_points/total_points*100:.1f}%)")
+                if 'depths' in batch:
+                    print(f"  Depth range: [{batch['depths'].min().item():.3f}, {batch['depths'].max().item():.3f}]")
+                if 'world_points' in batch:
+                    print(f"  World points range: [{batch['world_points'].min().item():.3f}, {batch['world_points'].max().item():.3f}]")
 
             # Forward pass with mixed precision
             if self.scaler is not None:
@@ -310,6 +335,28 @@ class UltrasoundTrainer:
                 else:
                     loss_dict[k] = float(v) * accumulation_steps
             epoch_losses.append(loss_dict)
+            
+            # Update running averages
+            num_batches += 1
+            for k, v in loss_dict.items():
+                if k not in running_losses:
+                    running_losses[k] = v
+                else:
+                    # Exponential moving average with decay factor
+                    alpha = 0.95  # Smoothing factor
+                    running_losses[k] = alpha * running_losses[k] + (1 - alpha) * v
+            
+            # Update progress bar with key metrics
+            postfix_dict = {
+                "loss": f"{running_losses.get('total_loss', 0):.4f}",
+                "cam": f"{running_losses.get('loss_camera', 0):.4f}",
+                "pt": f"{running_losses.get('loss_conf', 0):.4f}",
+                "dep": f"{running_losses.get('loss_conf_depth', 0):.4f}",
+            }
+            # Add AUC metrics if available
+            if 'Auc_10' in running_losses:
+                postfix_dict["auc10"] = f"{running_losses['Auc_10']:.3f}"
+            pbar.set_postfix(postfix_dict)
 
             # Log to wandb
             if (
@@ -343,9 +390,14 @@ class UltrasoundTrainer:
         )
 
         val_losses = []
+        running_losses = {}
+        num_batches = 0
+        
+        # Create progress bar
+        pbar = tqdm(val_loader, desc="Validation")
 
         with torch.no_grad():
-            for batch in tqdm(val_loader, desc="Validation"):
+            for batch in pbar:
                 # Move batch to device
                 batch = {
                     k: v.to(self.device) if isinstance(v, torch.Tensor) else v
@@ -368,6 +420,28 @@ class UltrasoundTrainer:
                     else:
                         loss_dict[k] = float(v)
                 val_losses.append(loss_dict)
+                
+                # Update running averages
+                num_batches += 1
+                for k, v in loss_dict.items():
+                    if k not in running_losses:
+                        running_losses[k] = v
+                    else:
+                        # Exponential moving average
+                        alpha = 0.95
+                        running_losses[k] = alpha * running_losses[k] + (1 - alpha) * v
+                
+                # Update progress bar with key metrics
+                postfix_dict = {
+                    "loss": f"{running_losses.get('total_loss', 0):.4f}",
+                    "cam": f"{running_losses.get('loss_camera', 0):.4f}",
+                    "pt": f"{running_losses.get('loss_conf', 0):.4f}",
+                    "dep": f"{running_losses.get('loss_conf_depth', 0):.4f}",
+                }
+                # Add AUC metrics if available
+                if 'Auc_10' in running_losses:
+                    postfix_dict["auc10"] = f"{running_losses['Auc_10']:.3f}"
+                pbar.set_postfix(postfix_dict)
 
         # Average validation losses
         avg_losses = {}
@@ -450,84 +524,43 @@ class UltrasoundTrainer:
         print("Training completed!")
 
 
-def create_default_config():
-    """Create default configuration for ultrasound training."""
-    config = OmegaConf.create(
-        {
-            "model": {
-                "pretrained_name": "facebook/VGGT-1B",  # Only available model
-                "freeze_aggregator": True,  # Freeze to save memory
-                "freeze_camera_head": True,  # Freeze to save memory
-                "predict_depth": True,
-                "predict_points": True,
-            },
-            "data": {
-                "hdf5_root_dir": "/home/varun/XiaLabSync/datasets/freehand_May212025/processed",
-                "img_size": 518,
-                "patch_size": 14,
-                "sequence_length": 4,  # Reduced from 8 to save memory
-                "stride": 10,  # Increased stride to get more variation
-                "batch_size": 1,  # Minimum batch size for memory
-                "num_workers": 2,  # Reduced workers to save memory
-                "max_sequences_per_file": 10,
-                "train_split_ratio": 0.8,
-                "enable_augmentation": False,  # Start without augmentation
-                "aug_scales": [0.9, 1.1],
-            },
-            "optimizer": {
-                "type": "adamw",
-                "lr": 1e-5,  # Lower learning rate for finetuning
-                "weight_decay": 0.05,
-                "beta1": 0.9,
-                "beta2": 0.999,
-            },
-            "scheduler": {
-                "type": "cosine",
-                "min_lr": 1e-6,
-            },
-            "loss": {
-                # Loss weights - emphasize point loss for ultrasound
-                "weight_camera": 0.1,  # Lower weight for synthetic cameras
-                "weight_depth": 0.2,  # Medium weight for depth
-                "weight_point": 1.0,  # High weight for pointmaps (main supervision)
-                # Camera loss settings
-                "camera_loss_type": "l1",
-                "weight_camera_T": 1.0,
-                "weight_camera_R": 1.0,
-                "weight_camera_fl": 0.5,
-                # Depth loss settings
-                "depth_conf_alpha": 0.2,
-                "depth_gradient_loss": "grad",
-                "disable_depth_conf": False,
-                # Point loss settings
-                "normalize_pred_points": True,
-                "point_conf_alpha": 0.2,
-                "point_gradient_loss": "grad",
-                "disable_point_conf": False,
-            },
-            "training": {
-                "num_epochs": 50,
-                "grad_clip": 1.0,
-                "save_freq": 5,
-                "checkpoint_dir": "./checkpoints/ultrasound",
-                "use_amp": True,  # Use automatic mixed precision
-                "gradient_accumulation_steps": 4,  # Accumulate gradients
-            },
-            "logging": {
-                "use_wandb": False,  # Set to True if you want to use wandb
-                "wandb_project": "vggt-ultrasound",
-                "exp_name": f'ultrasound_{datetime.now().strftime("%Y%m%d_%H%M%S")}',
-                "log_freq": 10,
-            },
-        }
-    )
-
-    return config
+def validate_config(config):
+    """Validate that all required configuration parameters are present."""
+    required_fields = {
+        "model": ["pretrained_name", "freeze_aggregator", "freeze_camera_head", "predict_depth", "predict_points"],
+        "data": ["hdf5_root_dir", "img_size", "patch_size", "sequence_length", "stride", 
+                 "batch_size", "num_workers", "max_sequences_per_file", "train_split_ratio",
+                 "enable_augmentation", "aug_scales"],
+        "optimizer": ["type", "lr", "weight_decay", "beta1", "beta2"],
+        "scheduler": ["type", "min_lr"],
+        "loss": ["weight_camera", "weight_depth", "weight_point", "camera_loss_type",
+                 "weight_camera_T", "weight_camera_R", "weight_camera_fl",
+                 "depth_conf_alpha", "depth_gradient_loss", "disable_depth_conf",
+                 "normalize_pred_points", "point_conf_alpha", "point_gradient_loss", 
+                 "disable_point_conf"],
+        "training": ["num_epochs", "grad_clip", "save_freq", "checkpoint_dir", 
+                     "use_amp", "gradient_accumulation_steps"],
+        "logging": ["use_wandb", "wandb_project", "exp_name", "log_freq"],
+    }
+    
+    missing_fields = []
+    for section, fields in required_fields.items():
+        if section not in config:
+            missing_fields.append(f"Section '{section}' is missing")
+            continue
+        for field in fields:
+            if field not in config[section]:
+                missing_fields.append(f"Field '{section}.{field}' is missing")
+    
+    if missing_fields:
+        raise ValueError(f"Missing required configuration fields:\n" + "\n".join(missing_fields))
+    
+    return True
 
 
 def main():
     parser = argparse.ArgumentParser(description="Train VGGT on ultrasound data")
-    parser.add_argument("--config", type=str, default=None, help="Path to config file")
+    parser.add_argument("config", type=str, help="Path to YAML config file (required)")
     parser.add_argument(
         "--batch_size", type=int, default=None, help="Override batch size"
     )
@@ -539,13 +572,16 @@ def main():
 
     args = parser.parse_args()
 
-    # Load config
-    if args.config:
-        config = OmegaConf.load(args.config)
-    else:
-        config = create_default_config()
+    # Load config (required)
+    if not os.path.exists(args.config):
+        raise FileNotFoundError(f"Config file not found: {args.config}")
+    
+    config = OmegaConf.load(args.config)
+    
+    # Validate config has all required fields
+    validate_config(config)
 
-    # Override config with command line arguments
+    # Override config with command line arguments if provided
     if args.batch_size is not None:
         config.data.batch_size = args.batch_size
     if args.num_epochs is not None:

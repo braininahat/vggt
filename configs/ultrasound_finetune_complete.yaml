@@ -1,0 +1,70 @@
+# Complete configuration for ultrasound finetuning
+# All fields are required - no defaults in the training script
+
+model:
+  pretrained_name: "facebook/VGGT-1B"
+  freeze_aggregator: true
+  freeze_camera_head: false
+  predict_depth: true
+  predict_points: true
+
+data:
+  hdf5_root_dir: "/home/varun/XiaLabSync/datasets/freehand_May212025/processed"
+  img_size: 518
+  patch_size: 14
+  sequence_length: 8
+  stride: 2
+  batch_size: 4
+  num_workers: 4
+  max_sequences_per_file: -1  # -1 to use all available sequences, or positive number to limit
+  train_split_ratio: 0.8
+  enable_augmentation: false
+  aug_scales: [0.9, 1.1]
+
+optimizer:
+  type: "adamw"
+  lr: 1.0e-5
+  weight_decay: 0.05
+  beta1: 0.9
+  beta2: 0.999
+
+scheduler:
+  type: "cosine"
+  min_lr: 1.0e-6
+
+loss:
+  # Loss weights
+  weight_camera: 0.1
+  weight_depth: 0.2
+  weight_point: 1.0
+  
+  # Camera loss settings
+  camera_loss_type: "l1"
+  weight_camera_T: 1.0
+  weight_camera_R: 1.0
+  weight_camera_fl: 0.5
+  
+  # Depth loss settings
+  depth_conf_alpha: 0.2
+  depth_gradient_loss: "grad"
+  disable_depth_conf: false
+  
+  # Point loss settings
+  normalize_pred_points: true
+  point_conf_alpha: 0.2
+  point_gradient_loss: "grad"
+  disable_point_conf: false
+
+training:
+  num_epochs: 50
+  grad_clip: 1.0
+  save_freq: 5
+  checkpoint_dir: "./checkpoints/ultrasound"
+  use_amp: false
+  gradient_accumulation_steps: 1
+
+logging:
+  use_wandb: true
+  wandb_project: "vggt-ultrasound"
+  exp_name: "ultrasound_vggt"
+  log_freq: 1
