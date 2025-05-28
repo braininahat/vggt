@@ -3,19 +3,19 @@
 
 model:
   pretrained_name: "facebook/VGGT-1B"
-  freeze_aggregator: true
+  freeze_aggregator: false
   freeze_camera_head: false
   predict_depth: true
   predict_points: true
 
 data:
-  hdf5_root_dir: "/home/varun/XiaLabSync/datasets/freehand_May212025/processed"
-  img_size: 518
+  hdf5_root_dir: "/home/csgrad/varunshi/dataset/processed"
+  img_size: 308
   patch_size: 14
-  sequence_length: 8
-  stride: 2
-  batch_size: 4
-  num_workers: 4
+  sequence_length: 2
+  stride: 1
+  batch_size: 6
+  num_workers: 6
   max_sequences_per_file: -1  # -1 to use all available sequences, or positive number to limit
   train_split_ratio: 0.8
   enable_augmentation: false
@@ -56,11 +56,11 @@ loss:
   disable_point_conf: false
 
 training:
-  num_epochs: 50
+  num_epochs: 5
   grad_clip: 1.0
-  save_freq: 5
+  save_freq: 1
   checkpoint_dir: "./checkpoints/ultrasound"
-  use_amp: false
+  use_amp: true
   gradient_accumulation_steps: 1
 
 logging:
