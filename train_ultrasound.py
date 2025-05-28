@@ -43,8 +43,9 @@ class UltrasoundTrainer:
         # Initialize optimizer
         self.optimizer = self._init_optimizer()
 
-        # Initialize scheduler
+        # Initialize scheduler after datasets are created
         self.scheduler = self._init_scheduler()
+        # self.scheduler_step_level is set in _init_scheduler()
 
         # Initialize wandb if enabled
         if config.logging.use_wandb:
@@ -157,17 +158,34 @@ class UltrasoundTrainer:
 
     def _init_scheduler(self):
         """Initialize learning rate scheduler."""
+        # Calculate total steps for step-level scheduling
+        steps_per_epoch = len(self.train_dataset) // (self.config.data.batch_size * self.config.training.gradient_accumulation_steps)
+        total_steps = steps_per_epoch * self.config.training.num_epochs
+        
         if self.config.scheduler.type == "cosine":
-            scheduler = optim.lr_scheduler.CosineAnnealingLR(
-                self.optimizer,
-                T_max=self.config.training.num_epochs,
-                eta_min=self.config.scheduler.min_lr,
-            )
+            # Check if we should use step-level or epoch-level scheduling
+            if self.config.scheduler.get('step_level', True):
+                # Step-level cosine annealing
+                scheduler = optim.lr_scheduler.CosineAnnealingLR(
+                    self.optimizer,
+                    T_max=total_steps,
+                    eta_min=self.config.scheduler.min_lr,
+                )
+                self.scheduler_step_level = True
+            else:
+                # Epoch-level cosine annealing
+                scheduler = optim.lr_scheduler.CosineAnnealingLR(
+                    self.optimizer,
+                    T_max=self.config.training.num_epochs,
+                    eta_min=self.config.scheduler.min_lr,
+                )
+                self.scheduler_step_level = False
         elif self.config.scheduler.type == "constant":
             scheduler = optim.lr_scheduler.LambdaLR(
                 self.optimizer,
                 lr_lambda=lambda epoch: 1.0,
             )
+            self.scheduler_step_level = False
         else:
             raise ValueError(f"Unknown scheduler type: {self.config.scheduler.type}")
 
@@ -326,6 +344,10 @@ class UltrasoundTrainer:
                     self.optimizer.step()
                 
                 self.optimizer.zero_grad()
+                
+                # Step-level scheduler update
+                if self.scheduler_step_level:
+                    self.scheduler.step()
 
             # Record losses (unscaled)
             loss_dict = {}
@@ -347,11 +369,13 @@ class UltrasoundTrainer:
                     running_losses[k] = alpha * running_losses[k] + (1 - alpha) * v
             
             # Update progress bar with key metrics
+            current_lr = self.optimizer.param_groups[0]['lr']
             postfix_dict = {
                 "loss": f"{running_losses.get('total_loss', 0):.4f}",
                 "cam": f"{running_losses.get('loss_camera', 0):.4f}",
                 "pt": f"{running_losses.get('loss_conf', 0):.4f}",
                 "dep": f"{running_losses.get('loss_conf_depth', 0):.4f}",
+                "lr": f"{current_lr:.2e}",
             }
             # Add AUC metrics if available
             if 'Auc_10' in running_losses:
@@ -498,8 +522,9 @@ class UltrasoundTrainer:
             for k, v in val_losses.items():
                 print(f"  {k}: {v:.4f}")
 
-            # Update learning rate
-            self.scheduler.step()
+            # Update learning rate (only for epoch-level schedulers)
+            if not self.scheduler_step_level:
+                self.scheduler.step()
 
             # Log to wandb
             if self.config.logging.use_wandb:

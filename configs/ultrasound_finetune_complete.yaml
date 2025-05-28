@@ -31,6 +31,7 @@ optimizer:
 scheduler:
   type: "cosine"
   min_lr: 1.0e-6
+  step_level: true  # true for step-level scheduling, false for epoch-level
 
 loss:
   # Loss weights
