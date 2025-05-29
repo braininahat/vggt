@@ -13,9 +13,6 @@ from torch.utils.data import DataLoader
 import h5py
 
 from vggt.models.vggt import VGGT
-from training.data.datasets.ultrasound_hdf5 import UltrasoundDataset
-from vggt.utils.geometry import get_camera_matrixs
-from vggt.utils.visual_track import denormalize_by_img_size
 
 
 def load_model(checkpoint_path, config_path, device="cuda"):
