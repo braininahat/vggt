@@ -41,15 +41,47 @@ def load_model(checkpoint_path, config_path, device="cuda"):
     return model, config
 
 
-def process_sequence(model, images, device="cuda"):
+def resize_and_crop_to_square(image, target_size):
+    """Resize image preserving aspect ratio and center crop to square, matching training."""
+    h, w = image.shape[:2]
+    
+    # Calculate scale to fit the target size
+    scale = max(target_size / h, target_size / w)
+    new_h, new_w = int(h * scale), int(w * scale)
+    
+    # Resize preserving aspect ratio
+    resized = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+    
+    # Center crop to target size
+    y_start = (new_h - target_size) // 2
+    x_start = (new_w - target_size) // 2
+    cropped = resized[y_start:y_start + target_size, x_start:x_start + target_size]
+    
+    return cropped
+
+
+def process_sequence(model, images, target_size, device="cuda"):
     """Process a sequence of images through the model to get 3D predictions."""
-    # Ensure images are in the right format
+    # Process numpy array
     if isinstance(images, np.ndarray):
+        # Resize and crop each frame to match training preprocessing
+        processed_frames = []
+        for i in range(len(images)):
+            frame = images[i]
+            # Resize and crop to square
+            processed = resize_and_crop_to_square(frame, target_size)
+            processed_frames.append(processed)
+        
+        images = np.stack(processed_frames)
         images = torch.from_numpy(images).float()
     
     # Normalize to [0, 1] if needed
     if images.max() > 1.0:
         images = images / 255.0
+    
+    # Apply ImageNet normalization to match training
+    # From training: images = (images / 255.0 - 0.45) / 0.225
+    images = (images - 0.45) / 0.225
     
     # Add batch dimension if needed
     if len(images.shape) == 4:  # [S, H, W, C]
@@ -66,7 +98,7 @@ def process_sequence(model, images, device="cuda"):
     return predictions
 
 
-def process_long_sequence_sliding_window(model, frames, window_size, stride=1, device="cuda"):
+def process_long_sequence_sliding_window(model, frames, window_size, target_size, stride=1, device="cuda"):
     """Process a long video sequence using sliding window inference."""
     n_frames = len(frames)
     all_predictions = {
@@ -83,7 +115,7 @@ def process_long_sequence_sliding_window(model, frames, window_size, stride=1, d
         window_frames = frames[start_idx:end_idx]
         
         # Process this window
-        predictions = process_sequence(model, window_frames, device)
+        predictions = process_sequence(model, window_frames, target_size, device)
         
         # Store predictions for all frames in the window
         if stride == 1:
@@ -106,7 +138,7 @@ def process_long_sequence_sliding_window(model, frames, window_size, stride=1, d
     if stride > 1 and n_frames % stride != 0:
         start_idx = n_frames - window_size
         window_frames = frames[start_idx:]
-        predictions = process_sequence(model, window_frames, device)
+        predictions = process_sequence(model, window_frames, target_size, device)
         
         # Take only the new frames
         new_frames = n_frames - (start_idx + window_size)
@@ -188,6 +220,143 @@ def visualize_3d_volume(predictions, save_path=None, show_confidence=True):
         plt.show()
     
     return fig
+
+
+def save_volume_projections(predictions, output_dir, prefix="volume", min_confidence=0.5):
+    """Save 2D projections of the 3D volume as PNG images."""
+    output_dir = Path(output_dir)
+    
+    # Extract data
+    world_points = predictions['world_points'][0].cpu().numpy()  # [S, H, W, 3]
+    world_points_conf = predictions['world_points_conf'][0].cpu().numpy() if 'world_points_conf' in predictions else np.ones_like(world_points[..., 0])
+    
+    # Create projection directory
+    proj_dir = output_dir / "projections"
+    proj_dir.mkdir(exist_ok=True)
+    
+    # Process each frame
+    for frame_idx in range(world_points.shape[0]):
+        points = world_points[frame_idx]  # [H, W, 3]
+        conf = world_points_conf[frame_idx]  # [H, W]
+        
+        # Apply confidence threshold
+        mask = conf > min_confidence
+        
+        # Create figure with 3 projections
+        fig, axes = plt.subplots(2, 2, figsize=(12, 12))
+        
+        # XY projection (top-down view)
+        ax = axes[0, 0]
+        valid_points = points[mask]
+        if len(valid_points) > 0:
+            scatter = ax.scatter(valid_points[:, 0], valid_points[:, 1], 
+                               c=valid_points[:, 2], cmap='viridis', s=1, alpha=0.6)
+            ax.set_xlabel('X')
+            ax.set_ylabel('Y')
+            ax.set_title(f'XY Projection (Top View) - Frame {frame_idx}')
+            ax.set_aspect('equal')
+            plt.colorbar(scatter, ax=ax, label='Z depth')
+        
+        # XZ projection (side view)
+        ax = axes[0, 1]
+        if len(valid_points) > 0:
+            scatter = ax.scatter(valid_points[:, 0], valid_points[:, 2], 
+                               c=valid_points[:, 1], cmap='viridis', s=1, alpha=0.6)
+            ax.set_xlabel('X')
+            ax.set_ylabel('Z')
+            ax.set_title(f'XZ Projection (Side View) - Frame {frame_idx}')
+            ax.set_aspect('equal')
+            plt.colorbar(scatter, ax=ax, label='Y')
+        
+        # YZ projection (front view)
+        ax = axes[1, 0]
+        if len(valid_points) > 0:
+            scatter = ax.scatter(valid_points[:, 1], valid_points[:, 2], 
+                               c=valid_points[:, 0], cmap='viridis', s=1, alpha=0.6)
+            ax.set_xlabel('Y')
+            ax.set_ylabel('Z')
+            ax.set_title(f'YZ Projection (Front View) - Frame {frame_idx}')
+            ax.set_aspect('equal')
+            plt.colorbar(scatter, ax=ax, label='X')
+        
+        # 3D view
+        ax = fig.add_subplot(2, 2, 4, projection='3d')
+        if len(valid_points) > 0:
+            # Downsample for 3D view if too many points
+            if len(valid_points) > 10000:
+                indices = np.random.choice(len(valid_points), 10000, replace=False)
+                plot_points = valid_points[indices]
+            else:
+                plot_points = valid_points
+            
+            ax.scatter(plot_points[:, 0], plot_points[:, 1], plot_points[:, 2], 
+                      c=conf[mask].flatten()[:len(plot_points)], cmap='viridis', s=1, alpha=0.6)
+            ax.set_xlabel('X')
+            ax.set_ylabel('Y')
+            ax.set_zlabel('Z')
+            ax.set_title(f'3D View - Frame {frame_idx}')
+        
+        plt.tight_layout()
+        
+        # Save figure
+        proj_path = proj_dir / f"{prefix}_frame_{frame_idx:04d}_projections.png"
+        plt.savefig(proj_path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+    
+    # Create a summary projection using all frames
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    
+    # Combine all frames
+    all_points = world_points.reshape(-1, 3)
+    all_conf = world_points_conf.flatten()
+    mask = all_conf > min_confidence
+    valid_points = all_points[mask]
+    
+    if len(valid_points) > 50000:
+        indices = np.random.choice(len(valid_points), 50000, replace=False)
+        valid_points = valid_points[indices]
+    
+    # XY projection
+    ax = axes[0]
+    if len(valid_points) > 0:
+        scatter = ax.scatter(valid_points[:, 0], valid_points[:, 1], 
+                           c=valid_points[:, 2], cmap='viridis', s=0.5, alpha=0.4)
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+        ax.set_title('XY Projection - All Frames')
+        ax.set_aspect('equal')
+        plt.colorbar(scatter, ax=ax, label='Z depth')
+    
+    # XZ projection
+    ax = axes[1]
+    if len(valid_points) > 0:
+        scatter = ax.scatter(valid_points[:, 0], valid_points[:, 2], 
+                           c=valid_points[:, 1], cmap='viridis', s=0.5, alpha=0.4)
+        ax.set_xlabel('X')
+        ax.set_ylabel('Z')
+        ax.set_title('XZ Projection - All Frames')
+        ax.set_aspect('equal')
+        plt.colorbar(scatter, ax=ax, label='Y')
+    
+    # YZ projection
+    ax = axes[2]
+    if len(valid_points) > 0:
+        scatter = ax.scatter(valid_points[:, 1], valid_points[:, 2], 
+                           c=valid_points[:, 0], cmap='viridis', s=0.5, alpha=0.4)
+        ax.set_xlabel('Y')
+        ax.set_ylabel('Z')
+        ax.set_title('YZ Projection - All Frames')
+        ax.set_aspect('equal')
+        plt.colorbar(scatter, ax=ax, label='X')
+    
+    plt.tight_layout()
+    summary_path = proj_dir / f"{prefix}_all_frames_projections.png"
+    plt.savefig(summary_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    
+    print(f"Saved projection images to {proj_dir}")
+    print(f"  - Individual frame projections: {len(world_points)} files")
+    print(f"  - Summary projection: {summary_path}")
 
 
 def save_volume_data(predictions, output_dir, prefix="volume"):
@@ -350,7 +519,9 @@ def main():
     parser.add_argument("--stride", type=int, default=1,
                         help="Stride for sliding window inference")
     parser.add_argument("--save_volume", action="store_true",
-                        help="Save 3D volume data (NPZ, PLY, PCD formats)")
+                        help="Save 3D volume data (NPZ format)")
+    parser.add_argument("--save_projections", action="store_true",
+                        help="Save 2D projections of 3D volume as PNG images")
     parser.add_argument("--min_confidence", type=float, default=0.5,
                         help="Minimum confidence threshold for point cloud export")
     
@@ -399,13 +570,14 @@ def main():
     
     # Process through model
     print("Processing frames through model...")
+    target_size = config['data']['img_size']
     if len(frames) <= window_size:
         # Process all frames at once
-        predictions = process_sequence(model, frames, args.device)
+        predictions = process_sequence(model, frames, target_size, args.device)
     else:
         # Use sliding window for long sequences
         print(f"Using sliding window inference with window_size={window_size}, stride={args.stride}")
-        predictions = process_long_sequence_sliding_window(model, frames, window_size, args.stride, args.device)
+        predictions = process_long_sequence_sliding_window(model, frames, window_size, target_size, args.stride, args.device)
     
     # Create visualizations
     print("Creating visualizations...")
@@ -414,6 +586,11 @@ def main():
     if args.save_volume:
         print("Saving 3D volume data...")
         save_volume_data(predictions, output_dir)
+    
+    # Save projections if requested
+    if args.save_projections:
+        print("Saving 2D projections...")
+        save_volume_projections(predictions, output_dir, min_confidence=args.min_confidence)
     
     # Static multi-frame visualization
     static_path = output_dir / "3d_volume_multiframe.png"
