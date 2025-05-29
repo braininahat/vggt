@@ -250,140 +250,125 @@ def visualize_3d_volume(predictions, save_path=None, show_confidence=True):
 
 
 def save_volume_projections(predictions, output_dir, prefix="volume", min_confidence=0.5):
-    """Save 2D projections of the 3D volume as PNG images."""
+    """Save 2D projections of the entire aggregated 3D volume as a single PNG image."""
     output_dir = Path(output_dir)
     
     # Extract data
     world_points = predictions['world_points'][0].cpu().numpy()  # [S, H, W, 3]
     world_points_conf = predictions['world_points_conf'][0].cpu().numpy() if 'world_points_conf' in predictions else np.ones_like(world_points[..., 0])
     
-    # Create projection directory
-    proj_dir = output_dir / "projections"
-    proj_dir.mkdir(exist_ok=True)
-    
-    # Process each frame
-    for frame_idx in range(world_points.shape[0]):
-        points = world_points[frame_idx]  # [H, W, 3]
-        conf = world_points_conf[frame_idx]  # [H, W]
-        
-        # Apply confidence threshold
-        mask = conf > min_confidence
-        
-        # Create figure with 3 projections
-        fig, axes = plt.subplots(2, 2, figsize=(12, 12))
-        
-        # XY projection (top-down view)
-        ax = axes[0, 0]
-        valid_points = points[mask]
-        if len(valid_points) > 0:
-            scatter = ax.scatter(valid_points[:, 0], valid_points[:, 1], 
-                               c=valid_points[:, 2], cmap='viridis', s=1, alpha=0.6)
-            ax.set_xlabel('X')
-            ax.set_ylabel('Y')
-            ax.set_title(f'XY Projection (Top View) - Frame {frame_idx}')
-            ax.set_aspect('equal')
-            plt.colorbar(scatter, ax=ax, label='Z depth')
-        
-        # XZ projection (side view)
-        ax = axes[0, 1]
-        if len(valid_points) > 0:
-            scatter = ax.scatter(valid_points[:, 0], valid_points[:, 2], 
-                               c=valid_points[:, 1], cmap='viridis', s=1, alpha=0.6)
-            ax.set_xlabel('X')
-            ax.set_ylabel('Z')
-            ax.set_title(f'XZ Projection (Side View) - Frame {frame_idx}')
-            ax.set_aspect('equal')
-            plt.colorbar(scatter, ax=ax, label='Y')
-        
-        # YZ projection (front view)
-        ax = axes[1, 0]
-        if len(valid_points) > 0:
-            scatter = ax.scatter(valid_points[:, 1], valid_points[:, 2], 
-                               c=valid_points[:, 0], cmap='viridis', s=1, alpha=0.6)
-            ax.set_xlabel('Y')
-            ax.set_ylabel('Z')
-            ax.set_title(f'YZ Projection (Front View) - Frame {frame_idx}')
-            ax.set_aspect('equal')
-            plt.colorbar(scatter, ax=ax, label='X')
-        
-        # 3D view
-        ax = fig.add_subplot(2, 2, 4, projection='3d')
-        if len(valid_points) > 0:
-            # Downsample for 3D view if too many points
-            if len(valid_points) > 10000:
-                indices = np.random.choice(len(valid_points), 10000, replace=False)
-                plot_points = valid_points[indices]
-            else:
-                plot_points = valid_points
-            
-            ax.scatter(plot_points[:, 0], plot_points[:, 1], plot_points[:, 2], 
-                      c=conf[mask].flatten()[:len(plot_points)], cmap='viridis', s=1, alpha=0.6)
-            ax.set_xlabel('X')
-            ax.set_ylabel('Y')
-            ax.set_zlabel('Z')
-            ax.set_title(f'3D View - Frame {frame_idx}')
-        
-        plt.tight_layout()
-        
-        # Save figure
-        proj_path = proj_dir / f"{prefix}_frame_{frame_idx:04d}_projections.png"
-        plt.savefig(proj_path, dpi=150, bbox_inches='tight')
-        plt.close(fig)
-    
-    # Create a summary projection using all frames
-    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
-    
-    # Combine all frames
+    # Combine all frames from sliding window predictions
     all_points = world_points.reshape(-1, 3)
     all_conf = world_points_conf.flatten()
+    
+    # Apply confidence threshold
     mask = all_conf > min_confidence
     valid_points = all_points[mask]
+    valid_conf = all_conf[mask]
     
-    if len(valid_points) > 50000:
-        indices = np.random.choice(len(valid_points), 50000, replace=False)
+    print(f"Total points: {len(all_points)}, Valid points (conf > {min_confidence}): {len(valid_points)}")
+    
+    # Downsample if too many points for visualization
+    if len(valid_points) > 100000:
+        indices = np.random.choice(len(valid_points), 100000, replace=False)
         valid_points = valid_points[indices]
+        valid_conf = valid_conf[indices]
+        print(f"Downsampled to {len(valid_points)} points for visualization")
     
-    # XY projection
-    ax = axes[0]
-    if len(valid_points) > 0:
-        scatter = ax.scatter(valid_points[:, 0], valid_points[:, 1], 
-                           c=valid_points[:, 2], cmap='viridis', s=0.5, alpha=0.4)
-        ax.set_xlabel('X')
-        ax.set_ylabel('Y')
-        ax.set_title('XY Projection - All Frames')
-        ax.set_aspect('equal')
-        plt.colorbar(scatter, ax=ax, label='Z depth')
+    # Create figure with multiple projections
+    fig = plt.figure(figsize=(20, 15))
     
-    # XZ projection
-    ax = axes[1]
+    # XY projection (top-down view)
+    ax1 = plt.subplot(2, 3, 1)
     if len(valid_points) > 0:
-        scatter = ax.scatter(valid_points[:, 0], valid_points[:, 2], 
-                           c=valid_points[:, 1], cmap='viridis', s=0.5, alpha=0.4)
-        ax.set_xlabel('X')
-        ax.set_ylabel('Z')
-        ax.set_title('XZ Projection - All Frames')
-        ax.set_aspect('equal')
-        plt.colorbar(scatter, ax=ax, label='Y')
+        scatter = ax1.scatter(valid_points[:, 0], valid_points[:, 1], 
+                            c=valid_points[:, 2], cmap='viridis', s=0.5, alpha=0.6)
+        ax1.set_xlabel('X')
+        ax1.set_ylabel('Y')
+        ax1.set_title('XY Projection (Top View)')
+        ax1.set_aspect('equal')
+        plt.colorbar(scatter, ax=ax1, label='Z depth')
     
-    # YZ projection
-    ax = axes[2]
+    # XZ projection (side view)
+    ax2 = plt.subplot(2, 3, 2)
     if len(valid_points) > 0:
-        scatter = ax.scatter(valid_points[:, 1], valid_points[:, 2], 
-                           c=valid_points[:, 0], cmap='viridis', s=0.5, alpha=0.4)
-        ax.set_xlabel('Y')
-        ax.set_ylabel('Z')
-        ax.set_title('YZ Projection - All Frames')
-        ax.set_aspect('equal')
-        plt.colorbar(scatter, ax=ax, label='X')
+        scatter = ax2.scatter(valid_points[:, 0], valid_points[:, 2], 
+                            c=valid_points[:, 1], cmap='viridis', s=0.5, alpha=0.6)
+        ax2.set_xlabel('X')
+        ax2.set_ylabel('Z')
+        ax2.set_title('XZ Projection (Side View)')
+        ax2.set_aspect('equal')
+        plt.colorbar(scatter, ax=ax2, label='Y')
+    
+    # YZ projection (front view)
+    ax3 = plt.subplot(2, 3, 3)
+    if len(valid_points) > 0:
+        scatter = ax3.scatter(valid_points[:, 1], valid_points[:, 2], 
+                            c=valid_points[:, 0], cmap='viridis', s=0.5, alpha=0.6)
+        ax3.set_xlabel('Y')
+        ax3.set_ylabel('Z')
+        ax3.set_title('YZ Projection (Front View)')
+        ax3.set_aspect('equal')
+        plt.colorbar(scatter, ax=ax3, label='X')
+    
+    # 3D view with confidence coloring
+    ax4 = fig.add_subplot(2, 3, 4, projection='3d')
+    if len(valid_points) > 0:
+        # Further downsample for 3D view
+        if len(valid_points) > 20000:
+            indices = np.random.choice(len(valid_points), 20000, replace=False)
+            plot_points = valid_points[indices]
+            plot_conf = valid_conf[indices]
+        else:
+            plot_points = valid_points
+            plot_conf = valid_conf
+        
+        scatter = ax4.scatter(plot_points[:, 0], plot_points[:, 1], plot_points[:, 2], 
+                            c=plot_conf, cmap='hot', s=0.5, alpha=0.6)
+        ax4.set_xlabel('X')
+        ax4.set_ylabel('Y')
+        ax4.set_zlabel('Z')
+        ax4.set_title('3D View (colored by confidence)')
+        plt.colorbar(scatter, ax=ax4, label='Confidence')
+    
+    # 3D view from different angle
+    ax5 = fig.add_subplot(2, 3, 5, projection='3d')
+    if len(valid_points) > 0:
+        scatter = ax5.scatter(plot_points[:, 0], plot_points[:, 1], plot_points[:, 2], 
+                            c=plot_points[:, 2], cmap='viridis', s=0.5, alpha=0.6)
+        ax5.set_xlabel('X')
+        ax5.set_ylabel('Y')
+        ax5.set_zlabel('Z')
+        ax5.set_title('3D View (colored by Z depth)')
+        ax5.view_init(elev=20, azim=135)
+        plt.colorbar(scatter, ax=ax5, label='Z depth')
+    
+    # Statistics
+    ax6 = plt.subplot(2, 3, 6)
+    ax6.axis('off')
+    if len(valid_points) > 0:
+        stats_text = f"Volume Statistics:\n\n"
+        stats_text += f"Total frames processed: {world_points.shape[0]}\n"
+        stats_text += f"Total valid points: {len(all_points[mask]):,}\n"
+        stats_text += f"Points shown: {len(valid_points):,}\n\n"
+        stats_text += f"X range: [{valid_points[:, 0].min():.3f}, {valid_points[:, 0].max():.3f}]\n"
+        stats_text += f"Y range: [{valid_points[:, 1].min():.3f}, {valid_points[:, 1].max():.3f}]\n"
+        stats_text += f"Z range: [{valid_points[:, 2].min():.3f}, {valid_points[:, 2].max():.3f}]\n\n"
+        stats_text += f"Mean confidence: {valid_conf.mean():.3f}\n"
+        stats_text += f"Min confidence: {valid_conf.min():.3f}\n"
+        stats_text += f"Max confidence: {valid_conf.max():.3f}"
+        ax6.text(0.1, 0.9, stats_text, transform=ax6.transAxes, 
+                fontsize=12, verticalalignment='top', fontfamily='monospace')
+        ax6.set_title('Volume Statistics')
     
     plt.tight_layout()
-    summary_path = proj_dir / f"{prefix}_all_frames_projections.png"
-    plt.savefig(summary_path, dpi=150, bbox_inches='tight')
+    
+    # Save figure
+    output_path = output_dir / f"{prefix}_volume_projections.png"
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close(fig)
     
-    print(f"Saved projection images to {proj_dir}")
-    print(f"  - Individual frame projections: {len(world_points)} files")
-    print(f"  - Summary projection: {summary_path}")
+    print(f"Saved volume projections to {output_path}")
 
 
 def save_volume_data(predictions, output_dir, prefix="volume"):
