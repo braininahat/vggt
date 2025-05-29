@@ -28,8 +28,8 @@ def load_model(checkpoint_path, config_path, device="cuda"):
         embed_dim=1024  # Default for VGGT-1B
     )
     
-    # Load checkpoint
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    # Load checkpoint (weights_only=False for compatibility with older checkpoints)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     if 'model_state_dict' in checkpoint:
         model.load_state_dict(checkpoint['model_state_dict'])
     else:
