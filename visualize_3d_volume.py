@@ -17,19 +17,43 @@ from vggt.models.vggt import VGGT
 
 def load_model(checkpoint_path, config_path, device="cuda"):
     """Load the trained VGGT model from checkpoint."""
-    # Load config
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
+    # Load checkpoint first to check for embedded config
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     
-    # Initialize model
+    # Try to get config from checkpoint, otherwise load from file
+    if 'config' in checkpoint:
+        config = checkpoint['config']
+        print("Using config from checkpoint")
+    else:
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f)
+        print("Using config from file")
+    
+    # Calculate the actual image size from the position embedding shape
+    # pos_embed shape is [1, num_patches + 1, embed_dim] for ViT
+    if 'model_state_dict' in checkpoint:
+        pos_embed_shape = checkpoint['model_state_dict']['aggregator.patch_embed.pos_embed'].shape
+    else:
+        pos_embed_shape = checkpoint['aggregator.patch_embed.pos_embed'].shape
+    
+    num_patches = pos_embed_shape[1] - 1  # Subtract 1 for cls token if present
+    patch_size = config['data']['patch_size']
+    
+    # For square images: num_patches = (img_size / patch_size)^2
+    # So: img_size = patch_size * sqrt(num_patches)
+    import math
+    img_size = int(patch_size * math.sqrt(num_patches))
+    
+    print(f"Detected model was trained with img_size={img_size}, patch_size={patch_size}")
+    
+    # Initialize model with the correct size
     model = VGGT(
-        img_size=config['data']['img_size'],
-        patch_size=config['data']['patch_size'],
+        img_size=img_size,
+        patch_size=patch_size,
         embed_dim=1024  # Default for VGGT-1B
     )
     
-    # Load checkpoint (weights_only=False for compatibility with older checkpoints)
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    # Load weights
     if 'model_state_dict' in checkpoint:
         model.load_state_dict(checkpoint['model_state_dict'])
     else:
@@ -37,6 +61,9 @@ def load_model(checkpoint_path, config_path, device="cuda"):
     
     model = model.to(device)
     model.eval()
+    
+    # Update config with actual image size
+    config['data']['img_size'] = img_size
     
     return model, config
 
